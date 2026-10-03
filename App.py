@@ -11,7 +11,7 @@ import requests
 
 URL_API = os.environ.get(
     "URL_API",
-    "https://script.google.com/macros/s/AKfycbwfeW7j1DSik9ZiALV_jr1c35Ffbe4orCRaZr276Nfb32-6ja3JIWV0BFyArE0aIxT3/exec",
+    "https://script.google.com/macros/s/AKfycby6n6HIadClwXCj3gZsgFG0HqZJIliiwsu6n83JzDM8SsuxHQLqfmiseFXlP1kk8TY/exec",
 )
 APP_TIMEZONE = os.environ.get("APP_TIMEZONE", "America/Bogota")
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "20"))
