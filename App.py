@@ -21,7 +21,6 @@ API_REINTENTOS = int(os.environ.get("API_REINTENTOS", "2"))
 
 COLOR_MAP = {
     "Compras": "blue",
-    "Iglesia": "purple",
     "Gastos Personales": "orange",
     "Salidas": "pink",
     "Transporte": "teal",
@@ -37,8 +36,6 @@ def obtener_zona_horaria():
     try:
         return ZoneInfo(APP_TIMEZONE)
     except ZoneInfoNotFoundError:
-        # Colombia no usa horario de verano; este fallback evita que la app falle
-        # si la imagen de despliegue no trae la base de zonas horarias.
         return timezone(timedelta(hours=-5))
 
 
@@ -50,7 +47,6 @@ def hoy_local():
 
 
 def formato_moneda(valor):
-    """Formato simple para COP: $500.000."""
     try:
         numero = float(valor)
     except (TypeError, ValueError):
@@ -68,10 +64,6 @@ def formato_moneda_corto(valor):
 
 
 def convertir_monto(texto):
-    """
-    Convierte entradas frecuentes en Colombia:
-    500000, 500.000, 500,000, 12500,50 y 12500.50.
-    """
     if texto is None:
         raise ValueError("Monto vacío")
 
@@ -80,7 +72,6 @@ def convertir_monto(texto):
         raise ValueError("Monto vacío")
 
     if "," in valor and "." in valor:
-        # El último separador se interpreta como decimal.
         if valor.rfind(",") > valor.rfind("."):
             valor = valor.replace(".", "").replace(",", ".")
         else:
@@ -110,7 +101,6 @@ def monto_seguro(valor):
 
 
 def parsear_fecha(valor):
-    """Devuelve date cuando la fecha del API es reconocible."""
     if valor in (None, ""):
         return None
 
@@ -118,7 +108,6 @@ def parsear_fecha(valor):
     if not texto:
         return None
 
-    # ISO de Apps Script / JSON: 2026-09-10 o 2026-09-10T13:00:00.000Z
     try:
         iso = texto.replace("Z", "+00:00")
         dt = datetime.fromisoformat(iso)
@@ -128,7 +117,6 @@ def parsear_fecha(valor):
     except ValueError:
         pass
 
-    # Formatos de respaldo frecuentes.
     parte_fecha = texto.split(" ")[0]
     for formato in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y"):
         try:
@@ -146,15 +134,43 @@ def rango_semana(fecha=None):
     return inicio, fin
 
 
+def calcular_gastos_transporte(datos):
+    """Calcula lo gastado en transporte hoy y en el mes actual."""
+    hoy = hoy_local()
+    mes_actual = hoy.month
+    año_actual = hoy.year
+
+    gastado_hoy = 0.0
+    gastado_mes = 0.0
+
+    if not datos:
+        return gastado_hoy, gastado_mes
+
+    for item in datos:
+        cat = item.get("categoria", "")
+        if cat != "Transporte":
+            continue
+
+        fecha_item = parsear_fecha(item.get("fecha"))
+        if not fecha_item:
+            continue
+
+        monto = monto_seguro(item.get("monto"))
+
+        if fecha_item.month == mes_actual and fecha_item.year == año_actual:
+            gastado_mes += monto
+            if fecha_item == hoy:
+                gastado_hoy += monto
+
+    return gastado_hoy, gastado_mes
+
+
 async def main(page: ft.Page):
     page.title = "Mis Gastos"
     page.theme_mode = "dark"
     page.padding = 10
     page.horizontal_alignment = "center"
 
-    # Una sesión por usuario reutiliza conexiones HTTP. Las solicitudes de la
-    # pestaña Presupuesto se hacen de forma secuencial para evitar dos GET
-    # simultáneos contra el mismo Web App de Google Apps Script.
     http = requests.Session()
     http.headers.update({
         "Accept": "application/json",
@@ -175,15 +191,7 @@ async def main(page: ft.Page):
         page.update()
 
     def solicitar_json_sync(metodo, *, params=None, payload=None):
-        """
-        Llama al Web App de Apps Script con timeout amplio y reintentos.
-
-        Google Apps Script puede tardar varios segundos cuando el despliegue
-        estaba inactivo. La versión anterior usaba 12 s y convertía cualquier
-        HTTP 4xx/5xx en el mensaje genérico "No se pudo actualizar...".
-        """
         ultimo_error = None
-
         for intento in range(API_REINTENTOS + 1):
             try:
                 respuesta = http.request(
@@ -196,50 +204,30 @@ async def main(page: ft.Page):
                 )
 
                 if respuesta.status_code in (401, 403):
-                    raise RuntimeError(
-                        "El Web App de Google no permite acceso. "
-                        "Despliega Apps Script como 'Ejecutar como: yo' y "
-                        "'Quién tiene acceso: cualquier persona'."
-                    )
+                    raise RuntimeError("El Web App de Google no permite acceso.")
 
                 if respuesta.status_code >= 400:
-                    detalle = respuesta.text.strip().replace("\n", " ")[:180]
-                    raise RuntimeError(
-                        f"Google Apps Script respondió HTTP {respuesta.status_code}"
-                        + (f": {detalle}" if detalle else "")
-                    )
+                    raise RuntimeError(f"HTTP {respuesta.status_code}")
 
                 try:
                     return respuesta.json()
                 except ValueError as ex:
-                    inicio = respuesta.text.strip().replace("\n", " ")[:180]
-                    if "<html" in respuesta.text.lower():
-                        raise RuntimeError(
-                            "Google devolvió una página HTML en vez de JSON. "
-                            "Revisa que el despliegue del Web App sea público y que uses la URL /exec."
-                        ) from ex
-                    raise RuntimeError(
-                        "El servidor no devolvió JSON válido"
-                        + (f": {inicio}" if inicio else "")
-                    ) from ex
+                    raise RuntimeError("El servidor no devolvió JSON válido") from ex
 
             except (requests.Timeout, requests.ConnectionError) as ex:
                 ultimo_error = ex
                 if intento < API_REINTENTOS:
                     time.sleep(0.8 * (intento + 1))
                     continue
-                raise RuntimeError(
-                    "No fue posible conectar con Google Apps Script después de varios intentos. "
-                    "Comprueba Internet y el despliegue del Web App."
-                ) from ex
+                raise RuntimeError("No fue posible conectar.") from ex
             except requests.RequestException as ex:
                 ultimo_error = ex
                 if intento < API_REINTENTOS:
                     time.sleep(0.8 * (intento + 1))
                     continue
-                raise RuntimeError(f"Error de conexión con Google Apps Script: {ex}") from ex
+                raise RuntimeError(f"Error: {ex}") from ex
 
-        raise RuntimeError(f"No se pudo completar la solicitud: {ultimo_error}")
+        raise RuntimeError(f"Fallo: {ultimo_error}")
 
     async def solicitar_json(metodo, *, params=None, payload=None):
         return await asyncio.to_thread(
@@ -250,77 +238,39 @@ async def main(page: ft.Page):
         )
 
     async def obtener_datos(force=False):
-        """Obtiene los gastos usando caché corta para evitar GET repetidos."""
         ahora = time.monotonic()
-        if (
-            not force
-            and cache["datos"] is not None
-            and (ahora - cache["actualizado"]) < CACHE_TTL_SECONDS
-        ):
+        if not force and cache["datos"] is not None and (ahora - cache["actualizado"]) < CACHE_TTL_SECONDS:
             return cache["datos"]
 
         async with cache_lock:
             ahora = time.monotonic()
-            if (
-                not force
-                and cache["datos"] is not None
-                and (ahora - cache["actualizado"]) < CACHE_TTL_SECONDS
-            ):
+            if not force and cache["datos"] is not None and (ahora - cache["actualizado"]) < CACHE_TTL_SECONDS:
                 return cache["datos"]
 
             datos = await solicitar_json("GET")
             if not isinstance(datos, list):
-                if isinstance(datos, dict) and datos.get("status") == "error":
-                    raise RuntimeError(datos.get("message", "Error al consultar los gastos"))
-                raise RuntimeError(
-                    "El GET principal del API debe devolver una lista de gastos. "
-                    "Verifica que el Apps Script actualizado esté desplegado."
-                )
+                raise RuntimeError("Error al consultar los gastos.")
 
             cache["datos"] = datos
             cache["actualizado"] = time.monotonic()
             return datos
 
     async def obtener_presupuesto_api():
-        """Obtiene desde Google Sheets el presupuesto de la semana actual."""
-        resultado = await solicitar_json(
-            "GET",
-            params={"action": "presupuesto_actual"},
-        )
-
+        resultado = await solicitar_json("GET", params={"action": "presupuesto_actual"})
         if not isinstance(resultado, dict):
-            raise RuntimeError(
-                "El endpoint presupuesto_actual no está activo en Apps Script. "
-                "Vuelve a desplegar la última versión del código."
-            )
-        if resultado.get("status") == "error":
-            raise RuntimeError(resultado.get("message", "No se pudo consultar el presupuesto"))
-
-        # Aceptamos tanto {status, presupuesto} como una futura respuesta que
-        # añada más campos, siempre que presupuesto exista o sea 0.
-        if "presupuesto" not in resultado:
-            raise RuntimeError(
-                "La respuesta del servidor no contiene el campo 'presupuesto'. "
-                "Actualiza el código de Apps Script y vuelve a desplegarlo."
-            )
+            raise RuntimeError("Error al consultar el presupuesto.")
         return resultado
 
     async def enviar_datos_api(payload, mensaje_exito):
         if api_write_lock.locked():
-            show_snackbar("Ya se está guardando otra operación", es_error=True)
+            show_snackbar("Procesando...", es_error=True)
             return False
 
         async with api_write_lock:
-            btn_guardar.disabled = True
-            page.update()
-
             try:
                 resultado = await solicitar_json("POST", payload=payload)
-
-                if not isinstance(resultado, dict):
-                    raise RuntimeError("El servidor devolvió una respuesta inválida")
-                if resultado.get("status") != "success":
-                    raise RuntimeError(resultado.get("message", "El servidor rechazó la operación"))
+                if not isinstance(resultado, dict) or resultado.get("status") != "success":
+                    raise RuntimeError(resultado.get("message", "Operación rechazada"))
 
                 cache["datos"] = None
                 cache["actualizado"] = 0.0
@@ -329,43 +279,20 @@ async def main(page: ft.Page):
             except Exception as ex:
                 show_snackbar(f"Error al guardar: {ex}", es_error=True)
                 return False
-            finally:
-                btn_guardar.disabled = False
-                page.update()
 
     # ==========================================
     # 1. FORMULARIO REGISTRO
     # ==========================================
-    monto_input = ft.TextField(
-        label="Monto ($)",
-        keyboard_type="number",
-        prefix=ft.Text("$ "),
-        border_radius=12,
-    )
-
-    categoria_dropdown = ft.Dropdown(
-        label="Categoría",
-        border_radius=12,
-        options=[ft.dropdown.Option(cat) for cat in CATEGORIAS],
-    )
-
+    monto_input = ft.TextField(label="Monto ($)", keyboard_type="number", prefix=ft.Text("$ "), border_radius=12)
+    categoria_dropdown = ft.Dropdown(label="Categoría", border_radius=12, options=[ft.dropdown.Option(cat) for cat in CATEGORIAS])
     descripcion_input = ft.TextField(label="Descripción", border_radius=12)
     chk_4x1000 = ft.Checkbox(label="Aplica impuesto 4x1000", value=False)
-    btn_guardar = ft.ElevatedButton(
-        "Guardar Gasto",
-        icon="save",
-        style=ft.ButtonStyle(
-            shape=ft.RoundedRectangleBorder(radius=12),
-            padding=18,
-        ),
-        width=350,
-    )
+    btn_guardar = ft.ElevatedButton("Guardar Gasto", icon="save", style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), padding=18), width=350)
 
     async def enviar_gasto(e):
         if not monto_input.value or not categoria_dropdown.value:
             show_snackbar("Ingresa el monto y la categoría", es_error=True)
             return
-
         try:
             monto = convertir_monto(monto_input.value)
         except ValueError:
@@ -382,16 +309,16 @@ async def main(page: ft.Page):
             "valor4x1000": impuesto,
         }
 
-        guardado = await enviar_datos_api(
-            payload,
-            f"¡Gasto guardado! Impuesto: {formato_moneda(impuesto)}",
-        )
+        btn_guardar.disabled = True
+        page.update()
+        guardado = await enviar_datos_api(payload, f"¡Gasto guardado! Impuesto: {formato_moneda(impuesto)}")
         if guardado:
             monto_input.value = ""
             categoria_dropdown.value = None
             descripcion_input.value = ""
             chk_4x1000.value = False
-            page.update()
+        btn_guardar.disabled = False
+        page.update()
 
     btn_guardar.on_click = enviar_gasto
 
@@ -401,12 +328,7 @@ async def main(page: ft.Page):
                 ft.Text("Nuevo Gasto", size=22, weight="bold"),
                 ft.Text("Registra tus consumos diarios", size=13, color="grey"),
                 ft.Divider(height=10, color="transparent"),
-                monto_input,
-                categoria_dropdown,
-                descripcion_input,
-                chk_4x1000,
-                ft.Container(height=5),
-                btn_guardar,
+                monto_input, categoria_dropdown, descripcion_input, chk_4x1000, ft.Container(height=5), btn_guardar,
             ],
             spacing=12,
         ),
@@ -415,61 +337,133 @@ async def main(page: ft.Page):
     )
 
     # ==========================================
-    # 2. VISTA TRANSPORTE
+    # 2. VISTA TRANSPORTE (MEJORADA)
     # ==========================================
+    presupuesto_transporte_input = ft.TextField(
+        label="Monto mensual ($)", keyboard_type="number", prefix=ft.Text("$ "), border_radius=12, expand=True
+    )
+    presupuesto_t_text = ft.Text("$0", size=16, weight="bold")
+    gastado_hoy_t_text = ft.Text("$0", size=16, weight="bold", color="orange")
+    gastado_mes_t_text = ft.Text("$0", size=16, weight="bold", color="red")
+    restante_mes_t_text = ft.Text("$0", size=24, weight="bold", color="green")
+    
+    monto_transporte_custom = ft.TextField(
+        label="Otro monto", keyboard_type="number", prefix=ft.Text("$ "), border_radius=12, expand=True
+    )
+
+    async def actualizar_panel_transporte(datos=None):
+        if datos is None:
+            datos = cache.get("datos") or []
+
+        presupuesto_str = await page.client_storage.get_async("presupuesto_transporte")
+        presupuesto = float(presupuesto_str) if presupuesto_str else 0.0
+
+        gastado_hoy, gastado_mes = calcular_gastos_transporte(datos)
+        restante = presupuesto - gastado_mes
+
+        presupuesto_transporte_input.value = str(int(presupuesto)) if presupuesto > 0 else ""
+        presupuesto_t_text.value = formato_moneda(presupuesto)
+        gastado_hoy_t_text.value = formato_moneda(gastado_hoy)
+        gastado_mes_t_text.value = formato_moneda(gastado_mes)
+        restante_mes_t_text.value = formato_moneda(restante)
+        restante_mes_t_text.color = "red" if restante < 0 else "green"
+        page.update()
+
+    async def guardar_presupuesto_transporte(e):
+        try:
+            valor = convertir_monto(presupuesto_transporte_input.value)
+        except ValueError:
+            show_snackbar("Monto inválido", es_error=True)
+            return
+
+        await page.client_storage.set_async("presupuesto_transporte", str(valor))
+        show_snackbar("Presupuesto mensual de transporte guardado")
+        await actualizar_panel_transporte(cache.get("datos") or [])
+
     async def registrar_transporte(monto):
         payload = {
-            "action": "agregar",
-            "monto": float(monto),
-            "categoria": "Transporte",
-            "descripcion": "Transporte rápido",
-            "aplica4x1000": False,
-            "valor4x1000": 0.0,
+            "action": "agregar", "monto": float(monto), "categoria": "Transporte",
+            "descripcion": "Transporte diario", "aplica4x1000": False, "valor4x1000": 0.0,
         }
-        await enviar_datos_api(
-            payload,
-            f"✓ Transporte de {formato_moneda(monto)} registrado",
-        )
+        guardado = await enviar_datos_api(payload, f"✓ Transporte de {formato_moneda(monto)} registrado")
+        if guardado:
+            try:
+                datos = await obtener_datos(force=True)
+                await actualizar_panel_transporte(datos)
+            except Exception:
+                pass
+
+    async def registrar_transporte_custom(e):
+        if not monto_transporte_custom.value:
+            show_snackbar("Ingresa un monto", es_error=True)
+            return
+        try:
+            monto = convertir_monto(monto_transporte_custom.value)
+        except ValueError:
+            show_snackbar("Monto inválido", es_error=True)
+            return
+        
+        await registrar_transporte(monto)
+        monto_transporte_custom.value = ""
+        page.update()
 
     def crear_tarjeta_transporte(monto):
         async def click_transporte(e):
             await registrar_transporte(monto)
-
         return ft.Container(
             content=ft.Column(
-                controls=[
-                    ft.Icon("directions_bus", size=28, color="teal"),
-                    ft.Text(formato_moneda(monto), size=18, weight="bold"),
-                ],
-                alignment="center",
-                horizontal_alignment="center",
+                controls=[ft.Icon("directions_bus", size=28, color="teal"), ft.Text(formato_moneda(monto), size=18, weight="bold")],
+                alignment="center", horizontal_alignment="center",
             ),
-            bgcolor="#303030",
-            border_radius=16,
-            padding=15,
-            ink=True,
-            on_click=click_transporte,
-            width=145,
-            height=100,
+            bgcolor="#303030", border_radius=16, padding=15, ink=True, on_click=click_transporte, width=145, height=100,
         )
 
     vista_transporte = ft.Container(
         content=ft.Column(
             controls=[
-                ft.Text("Acceso Rápido", size=22, weight="bold"),
-                ft.Text("Selecciona una tarifa recurrente", size=13, color="grey"),
-                ft.Container(height=15),
+                ft.Text("Mi Transporte", size=22, weight="bold"),
+                ft.Card(
+                    content=ft.Container(
+                        content=ft.Column(
+                            controls=[
+                                ft.Row(
+                                    controls=[presupuesto_transporte_input, ft.ElevatedButton("Guardar", icon="save", on_click=guardar_presupuesto_transporte)],
+                                    vertical_alignment="center",
+                                ),
+                                ft.Divider(height=8),
+                                ft.Row(
+                                    controls=[
+                                        ft.Column([ft.Text("Mensual", size=10, color="grey"), presupuesto_t_text], expand=True),
+                                        ft.Column([ft.Text("Gastado Mes", size=10, color="grey"), gastado_mes_t_text], expand=True),
+                                        ft.Column([ft.Text("Gastado Hoy", size=10, color="grey"), gastado_hoy_t_text], expand=True),
+                                    ]
+                                ),
+                                ft.Container(height=4),
+                                ft.Container(
+                                    content=ft.Column(
+                                        controls=[ft.Text("Saldo Restante (Mes)", size=12, color="grey"), restante_mes_t_text]
+                                    ),
+                                    padding=10, bgcolor="#252525", border_radius=12,
+                                )
+                            ]
+                        ),
+                        padding=15
+                    )
+                ),
+                ft.Container(height=10),
+                ft.Text("Agregar Gasto Manual", size=16, weight="bold"),
+                ft.Row(
+                    controls=[monto_transporte_custom, ft.ElevatedButton("Agregar", icon="add", on_click=registrar_transporte_custom)],
+                    vertical_alignment="center"
+                ),
+                ft.Container(height=10),
+                ft.Text("Acceso Rápido", size=16, weight="bold"),
                 ft.Row(
                     controls=[
-                        crear_tarjeta_transporte(3000),
-                        crear_tarjeta_transporte(4000),
-                        crear_tarjeta_transporte(5000),
-                        crear_tarjeta_transporte(6000),
+                        crear_tarjeta_transporte(3000), crear_tarjeta_transporte(4000),
+                        crear_tarjeta_transporte(5000), crear_tarjeta_transporte(6000),
                     ],
-                    alignment="center",
-                    wrap=True,
-                    spacing=12,
-                    run_spacing=12,
+                    alignment="center", wrap=True, spacing=12, run_spacing=12,
                 ),
             ],
             horizontal_alignment="center",
@@ -485,13 +479,7 @@ async def main(page: ft.Page):
     lista_gastos = ft.Column(spacing=8)
     total_text = ft.Text("$0", size=26, weight="bold", color="green")
 
-    presupuesto_input = ft.TextField(
-        label="Presupuesto semanal ($)",
-        keyboard_type="number",
-        prefix=ft.Text("$ "),
-        border_radius=12,
-        expand=True,
-    )
+    presupuesto_input = ft.TextField(label="Presupuesto semanal ($)", keyboard_type="number", prefix=ft.Text("$ "), border_radius=12, expand=True)
     btn_presupuesto = ft.ElevatedButton("Guardar", icon="savings")
 
     presupuesto_text = ft.Text("$0", size=18, weight="bold")
@@ -515,11 +503,9 @@ async def main(page: ft.Page):
             fecha_item = parsear_fecha(item.get("fecha"))
             if fecha_item is None or not (inicio <= fecha_item <= fin):
                 continue
-
             monto = monto_seguro(item.get("monto"))
             gastos.append(item)
             por_dia[fecha_item] += monto
-
         return inicio, fin, gastos, por_dia
 
     def construir_grafica_semanal(por_dia, presupuesto):
@@ -536,34 +522,20 @@ async def main(page: ft.Page):
             grafica_semana.controls.append(
                 ft.Column(
                     controls=[
-                        ft.Text(
-                            formato_moneda_corto(monto),
-                            size=9,
-                            color="white" if es_hoy else "grey",
-                        ),
+                        ft.Text(formato_moneda_corto(monto), size=9, color="white" if es_hoy else "grey"),
                         ft.Container(
                             content=ft.Column(
                                 controls=[
                                     ft.Container(expand=True),
-                                    ft.Container(
-                                        width=24,
-                                        height=alto,
-                                        bgcolor="blue" if not es_hoy else "green",
-                                        border_radius=6,
-                                    ),
+                                    ft.Container(width=24, height=alto, bgcolor="blue" if not es_hoy else "green", border_radius=6),
                                 ],
                                 spacing=0,
                             ),
                             height=alto_max + 5,
                         ),
-                        ft.Text(
-                            DIAS_CORTOS[indice],
-                            size=10,
-                            weight="bold" if es_hoy else None,
-                        ),
+                        ft.Text(DIAS_CORTOS[indice], size=10, weight="bold" if es_hoy else None),
                     ],
-                    spacing=3,
-                    horizontal_alignment="center",
+                    spacing=3, horizontal_alignment="center",
                 )
             )
 
@@ -590,16 +562,10 @@ async def main(page: ft.Page):
             disponible_dia_subtext.value = f"Te pasaste {formato_moneda(abs(restante))} del presupuesto"
             progreso_semana.value = 1
         else:
-            disponible_dia_subtext.value = (
-                f"Promedio disponible para {dias_restantes} día"
-                + ("" if dias_restantes == 1 else "s")
-                + " (incluyendo hoy)"
-            )
+            disponible_dia_subtext.value = (f"Promedio disponible para {dias_restantes} día" + ("" if dias_restantes == 1 else "s") + " (incluyendo hoy)")
             progreso_semana.value = min(gastado / presupuesto, 1)
 
-        semana_rango_text.value = (
-            f"Semana: {inicio.strftime('%d/%m')} - {fin.strftime('%d/%m/%Y')}"
-        )
+        semana_rango_text.value = f"Semana: {inicio.strftime('%d/%m')} - {fin.strftime('%d/%m/%Y')}"
         construir_grafica_semanal(por_dia, presupuesto)
 
     async def guardar_presupuesto(e):
@@ -610,40 +576,23 @@ async def main(page: ft.Page):
             return
 
         if api_write_lock.locked():
-            show_snackbar("Ya se está guardando otra operación", es_error=True)
+            show_snackbar("Procesando...", es_error=True)
             return
 
         async with api_write_lock:
             btn_presupuesto.disabled = True
             page.update()
-
             try:
-                resultado = await solicitar_json(
-                    "POST",
-                    payload={
-                        "action": "guardar_presupuesto",
-                        "presupuesto": valor,
-                    },
-                )
-
-                if not isinstance(resultado, dict):
-                    raise RuntimeError("El API devolvió una respuesta inválida")
-                if resultado.get("status") != "success":
-                    raise RuntimeError(
-                        resultado.get("message", "No se pudo guardar el presupuesto")
-                    )
+                resultado = await solicitar_json("POST", payload={"action": "guardar_presupuesto", "presupuesto": valor})
+                if not isinstance(resultado, dict) or resultado.get("status") != "success":
+                    raise RuntimeError(resultado.get("message", "No se pudo guardar"))
 
                 estado_presupuesto["valor"] = valor
-
-                datos = cache["datos"]
-                if datos is None:
-                    datos = await obtener_datos()
-
+                datos = cache["datos"] or await obtener_datos()
                 actualizar_panel_semana(datos)
                 show_snackbar(resultado.get("message", "Presupuesto semanal guardado"))
-
             except Exception as ex:
-                show_snackbar(f"Error al guardar presupuesto: {ex}", es_error=True)
+                show_snackbar(f"Error: {ex}", es_error=True)
             finally:
                 btn_presupuesto.disabled = False
                 page.update()
@@ -660,28 +609,15 @@ async def main(page: ft.Page):
             content=ft.Row(
                 controls=[
                     ft.Container(width=4, height=35, bgcolor=color_cat, border_radius=2),
-                    ft.Column(
-                        controls=[
-                            ft.Text(cat, weight="bold", size=14),
-                            ft.Text(desc if desc else "Sin descripción", size=11, color="grey"),
-                        ],
-                        spacing=2,
-                        expand=True,
-                    ),
+                    ft.Column(controls=[ft.Text(cat, weight="bold", size=14), ft.Text(desc if desc else "Sin descripción", size=11, color="grey")], spacing=2, expand=True),
                     ft.Text(formato_moneda(monto), weight="bold", size=14),
                 ],
                 alignment="spaceBetween",
             ),
-            padding=12,
-            bgcolor="#303030",
-            border_radius=12,
+            padding=12, bgcolor="#303030", border_radius=12,
         )
 
     def crear_grupo_fecha(fecha, items_dia):
-        """
-        Construcción perezosa: no crea todos los controles de movimientos hasta
-        que el usuario abre ese día. Con historiales grandes reduce bastante el render.
-        """
         total_dia = sum(monto_seguro(i.get("monto")) for i in items_dia)
         col_movimientos = ft.Column(controls=[], visible=False, spacing=8)
         icono_toggle = ft.Icon("keyboard_arrow_down", color="grey")
@@ -693,37 +629,21 @@ async def main(page: ft.Page):
                 estado["renderizado"] = True
 
             col_movimientos.visible = not col_movimientos.visible
-            icono_toggle.name = (
-                "keyboard_arrow_up" if col_movimientos.visible else "keyboard_arrow_down"
-            )
+            icono_toggle.name = "keyboard_arrow_up" if col_movimientos.visible else "keyboard_arrow_down"
             page.update()
 
         header = ft.Container(
             content=ft.Row(
                 controls=[
                     ft.Text(str(fecha), weight="bold", size=15),
-                    ft.Row(
-                        controls=[
-                            ft.Text(formato_moneda(total_dia), weight="bold", size=14, color="grey"),
-                            icono_toggle,
-                        ],
-                        spacing=5,
-                    ),
+                    ft.Row(controls=[ft.Text(formato_moneda(total_dia), weight="bold", size=14, color="grey"), icono_toggle], spacing=5),
                 ],
                 alignment="spaceBetween",
             ),
-            ink=True,
-            on_click=toggle_vis,
-            padding=ft.padding.symmetric(horizontal=10, vertical=15),
-            border_radius=8,
+            ink=True, on_click=toggle_vis, padding=ft.padding.symmetric(horizontal=10, vertical=15), border_radius=8,
         )
 
-        return ft.Container(
-            content=ft.Column(controls=[header, col_movimientos], spacing=0),
-            bgcolor="#1e1e1e",
-            border_radius=10,
-            margin=ft.margin.only(bottom=8),
-        )
+        return ft.Container(content=ft.Column(controls=[header, col_movimientos], spacing=0), bgcolor="#1e1e1e", border_radius=10, margin=ft.margin.only(bottom=8))
 
     def renderizar_historial(datos):
         lista_gastos.controls.clear()
@@ -748,7 +668,6 @@ async def main(page: ft.Page):
             gran_total += monto
             gastos_por_fecha[fecha_key].append(item)
 
-        # Barras de categorías.
         ancho_maximo = 300
         if gran_total > 0:
             for cat, total in sorted(totales.items(), key=lambda x: -x[1]):
@@ -760,42 +679,23 @@ async def main(page: ft.Page):
                     ft.Column(
                         controls=[
                             ft.Row(
-                                controls=[
-                                    ft.Text(cat, size=13, weight="bold", expand=True),
-                                    ft.Text(
-                                        f"{formato_moneda(total)} ({porcentaje:.1f}%)",
-                                        size=12,
-                                        color="grey",
-                                    ),
-                                ],
+                                controls=[ft.Text(cat, size=13, weight="bold", expand=True), ft.Text(f"{formato_moneda(total)} ({porcentaje:.1f}%)", size=12, color="grey")],
                                 alignment="spaceBetween",
                             ),
                             ft.Container(
                                 content=ft.Stack(
                                     controls=[
-                                        ft.Container(
-                                            width=ancho_maximo,
-                                            height=8,
-                                            bgcolor="#424242",
-                                            border_radius=4,
-                                        ),
-                                        ft.Container(
-                                            width=ancho_relativo,
-                                            height=8,
-                                            bgcolor=color_cat,
-                                            border_radius=4,
-                                        ),
+                                        ft.Container(width=ancho_maximo, height=8, bgcolor="#424242", border_radius=4),
+                                        ft.Container(width=ancho_relativo, height=8, bgcolor=color_cat, border_radius=4),
                                     ]
                                 ),
-                                width=ancho_maximo,
-                                height=8,
+                                width=ancho_maximo, height=8,
                             ),
                         ],
                         spacing=4,
                     )
                 )
 
-        # Orden real por fecha cuando es ISO; los valores no reconocidos van al final.
         def clave_orden(fecha_texto):
             try:
                 return (1, date.fromisoformat(fecha_texto))
@@ -803,9 +703,7 @@ async def main(page: ft.Page):
                 return (0, date.min)
 
         for fecha_key in sorted(gastos_por_fecha.keys(), key=clave_orden, reverse=True):
-            lista_gastos.controls.append(
-                crear_grupo_fecha(fecha_key, gastos_por_fecha[fecha_key])
-            )
+            lista_gastos.controls.append(crear_grupo_fecha(fecha_key, gastos_por_fecha[fecha_key]))
 
         total_text.value = formato_moneda(gran_total)
         actualizar_panel_semana(datos)
@@ -813,17 +711,12 @@ async def main(page: ft.Page):
     async def cargar_historial(e=None, force=False):
         total_text.value = "Cargando..."
         page.update()
-
         try:
             datos = await obtener_datos(force=force)
             renderizar_historial(datos)
-        except requests.RequestException:
-            total_text.value = "Error"
-            show_snackbar("No se pudo consultar la hoja de gastos", es_error=True)
         except Exception as ex:
             total_text.value = "Error"
-            show_snackbar(f"Error al cargar reportes: {ex}", es_error=True)
-
+            show_snackbar(f"Error: {ex}", es_error=True)
         page.update()
 
     async def refrescar_historial(e):
@@ -833,58 +726,13 @@ async def main(page: ft.Page):
         content=ft.Container(
             content=ft.Column(
                 controls=[
-                    ft.Row(
-                        controls=[
-                            ft.Column(
-                                controls=[
-                                    ft.Text("Presupuesto semanal", size=17, weight="bold"),
-                                    semana_rango_text,
-                                ],
-                                spacing=2,
-                                expand=True,
-                            ),
-                            ft.Icon("account_balance_wallet", color="green"),
-                        ]
-                    ),
-                    ft.Row(
-                        controls=[presupuesto_input, btn_presupuesto],
-                        vertical_alignment="center",
-                    ),
+                    ft.Row(controls=[ft.Column(controls=[ft.Text("Presupuesto semanal", size=17, weight="bold"), semana_rango_text], spacing=2, expand=True), ft.Icon("account_balance_wallet", color="green")]),
+                    ft.Row(controls=[presupuesto_input, btn_presupuesto], vertical_alignment="center"),
                     ft.Divider(height=8),
-                    ft.Row(
-                        controls=[
-                            ft.Column(
-                                controls=[ft.Text("Presupuesto", size=10, color="grey"), presupuesto_text],
-                                expand=True,
-                            ),
-                            ft.Column(
-                                controls=[ft.Text("Gastado", size=10, color="grey"), gastado_semana_text],
-                                expand=True,
-                            ),
-                            ft.Column(
-                                controls=[ft.Text("Disponible", size=10, color="grey"), disponible_semana_text],
-                                expand=True,
-                            ),
-                        ],
-                        spacing=8,
-                    ),
-                    progreso_semana,
-                    ft.Container(height=4),
-                    ft.Container(
-                        content=ft.Column(
-                            controls=[
-                                ft.Text("Puedes gastar por día", size=11, color="grey"),
-                                disponible_dia_text,
-                                disponible_dia_subtext,
-                            ],
-                            spacing=2,
-                        ),
-                        padding=14,
-                        bgcolor="#252525",
-                        border_radius=12,
-                    ),
-                    ft.Text("Gasto de esta semana", size=13, weight="bold"),
-                    grafica_semana,
+                    ft.Row(controls=[ft.Column([ft.Text("Presupuesto", size=10, color="grey"), presupuesto_text], expand=True), ft.Column([ft.Text("Gastado", size=10, color="grey"), gastado_semana_text], expand=True), ft.Column([ft.Text("Disponible", size=10, color="grey"), disponible_semana_text], expand=True)], spacing=8),
+                    progreso_semana, ft.Container(height=4),
+                    ft.Container(content=ft.Column(controls=[ft.Text("Puedes gastar por día", size=11, color="grey"), disponible_dia_text, disponible_dia_subtext], spacing=2), padding=14, bgcolor="#252525", border_radius=12),
+                    ft.Text("Gasto de esta semana", size=13, weight="bold"), grafica_semana,
                 ],
                 spacing=12,
             ),
@@ -895,47 +743,22 @@ async def main(page: ft.Page):
     vista_historial = ft.Container(
         content=ft.Column(
             controls=[
-                ft.Row(
-                    controls=[
-                        ft.Text("Reportes", size=22, weight="bold"),
-                        ft.IconButton("refresh", on_click=refrescar_historial),
-                    ],
-                    alignment="spaceBetween",
-                ),
-                ft.Card(
-                    content=ft.Container(
-                        content=ft.Column(
-                            controls=[
-                                ft.Text("Gasto Total", size=12, color="grey"),
-                                total_text,
-                                ft.Divider(height=10),
-                                resumen_barras,
-                            ]
-                        ),
-                        padding=20,
-                    )
-                ),
-                ft.Container(height=10),
-                ft.Text("Historial por Día", size=16, weight="bold", color="white"),
-                lista_gastos,
+                ft.Row(controls=[ft.Text("Reportes", size=22, weight="bold"), ft.IconButton("refresh", on_click=refrescar_historial)], alignment="spaceBetween"),
+                ft.Card(content=ft.Container(content=ft.Column(controls=[ft.Text("Gasto Total", size=12, color="grey"), total_text, ft.Divider(height=10), resumen_barras]), padding=20)),
+                ft.Container(height=10), ft.Text("Historial por Día", size=16, weight="bold", color="white"), lista_gastos,
             ]
         ),
-        padding=20,
-        visible=False,
+        padding=20, visible=False,
     )
 
     async def cargar_presupuesto(e=None, force=False):
-        disponible_dia_subtext.value = "Cargando presupuesto y gastos..."
+        disponible_dia_subtext.value = "Cargando presupuesto..."
         page.update()
-
-        # Importante: no usamos asyncio.gather aquí. La versión anterior hacía
-        # dos solicitudes simultáneas con la misma Session de requests. Ahora
-        # se consultan secuencialmente y cada una tiene reintentos.
         try:
             datos = await obtener_datos(force=force)
         except Exception as ex:
             disponible_dia_subtext.value = "No se pudieron cargar los gastos"
-            show_snackbar(f"Error al consultar gastos: {ex}", es_error=True)
+            show_snackbar(f"Error: {ex}", es_error=True)
             page.update()
             return
 
@@ -948,17 +771,10 @@ async def main(page: ft.Page):
                 presupuesto_input.value = str(int(presupuesto))
             else:
                 presupuesto_input.value = ""
-
             actualizar_panel_semana(datos)
-
         except Exception as ex:
-            # Los gastos ya se cargaron correctamente: no rompemos toda la
-            # pestaña. Conservamos el valor visible anterior y mostramos el
-            # motivo real para saber si falta desplegar/autorizar Apps Script.
             actualizar_panel_semana(datos)
-            disponible_dia_subtext.value = "No se pudo leer el presupuesto guardado"
-            show_snackbar(f"Presupuesto: {ex}", es_error=True)
-
+            disponible_dia_subtext.value = "No se pudo leer el presupuesto"
         page.update()
 
     async def refrescar_presupuesto(e):
@@ -967,30 +783,12 @@ async def main(page: ft.Page):
     vista_presupuesto = ft.Container(
         content=ft.Column(
             controls=[
-                ft.Row(
-                    controls=[
-                        ft.Column(
-                            controls=[
-                                ft.Text("Presupuesto", size=22, weight="bold"),
-                                ft.Text(
-                                    "Controla cuánto puedes gastar esta semana",
-                                    size=12,
-                                    color="grey",
-                                ),
-                            ],
-                            spacing=2,
-                            expand=True,
-                        ),
-                        ft.IconButton("refresh", on_click=refrescar_presupuesto),
-                    ],
-                    alignment="spaceBetween",
-                ),
+                ft.Row(controls=[ft.Column(controls=[ft.Text("Presupuesto", size=22, weight="bold"), ft.Text("Controla cuánto puedes gastar esta semana", size=12, color="grey")], spacing=2, expand=True), ft.IconButton("refresh", on_click=refrescar_presupuesto)], alignment="spaceBetween"),
                 tarjeta_presupuesto,
             ],
             spacing=12,
         ),
-        padding=20,
-        visible=False,
+        padding=20, visible=False,
     )
 
     # ==========================================
@@ -1003,7 +801,13 @@ async def main(page: ft.Page):
         vista_presupuesto.visible = idx == 3
         page.update()
 
-        if idx == 2:
+        if idx == 1:
+            try:
+                datos = await obtener_datos()
+                await actualizar_panel_transporte(datos)
+            except Exception:
+                pass
+        elif idx == 2:
             await cargar_historial()
         elif idx == 3:
             await cargar_presupuesto()
@@ -1027,26 +831,15 @@ async def main(page: ft.Page):
 
     body = ft.Container(
         content=ft.Column(
-            controls=[
-                vista_formulario,
-                vista_transporte,
-                vista_historial,
-                vista_presupuesto,
-            ],
-            scroll="auto",
-            horizontal_alignment="center",
+            controls=[vista_formulario, vista_transporte, vista_historial, vista_presupuesto],
+            scroll="auto", horizontal_alignment="center",
         ),
-        expand=True,
-        width=480,
+        expand=True, width=480,
     )
 
     page.add(body)
-
-    # El presupuesto ya no se guarda localmente. Se consulta en Google Sheets
-    # al abrir la pestaña Presupuesto, para compartir el mismo valor entre dispositivos.
     actualizar_panel_semana([])
     page.update()
-
 
 if __name__ == "__main__":
     puerto = int(os.environ.get("PORT", 7860))
