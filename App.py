@@ -19,7 +19,6 @@ API_CONNECT_TIMEOUT = float(os.environ.get("API_CONNECT_TIMEOUT", "8"))
 API_READ_TIMEOUT = float(os.environ.get("API_READ_TIMEOUT", "35"))
 API_REINTENTOS = int(os.environ.get("API_REINTENTOS", "2"))
 
-# Solo las variables solicitadas
 COLOR_MAP = {
     "Comida": "orange",
     "Transporte": "teal",
@@ -28,6 +27,7 @@ COLOR_MAP = {
 }
 
 CATEGORIAS = list(COLOR_MAP.keys())
+DIAS_CORTOS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
 
 
 def obtener_zona_horaria():
@@ -50,6 +50,15 @@ def formato_moneda(valor):
     except (TypeError, ValueError):
         numero = 0.0
     return f"${numero:,.0f}".replace(",", ".")
+
+
+def formato_moneda_corto(valor):
+    valor = float(valor or 0)
+    if abs(valor) >= 1_000_000:
+        return f"${valor / 1_000_000:.1f}M".replace(".0M", "M")
+    if abs(valor) >= 1_000:
+        return f"${valor / 1_000:.0f}k"
+    return formato_moneda(valor)
 
 
 def convertir_monto(texto):
@@ -111,6 +120,13 @@ def parsear_fecha(valor):
         except ValueError:
             continue
     return None
+
+
+def rango_semana(fecha=None):
+    fecha = fecha or hoy_local()
+    inicio = fecha - timedelta(days=fecha.weekday())
+    fin = inicio + timedelta(days=6)
+    return inicio, fin
 
 
 async def main(page: ft.Page):
@@ -209,7 +225,7 @@ async def main(page: ft.Page):
                 return False
 
     # ==========================================
-    # 1. FORMULARIO REGISTRO Y ACCESO RÁPIDO
+    # 1. FORMULARIO REGISTRO
     # ==========================================
     monto_input = ft.TextField(label="Monto ($)", keyboard_type="number", prefix=ft.Text("$ "), border_radius=12)
     categoria_dropdown = ft.Dropdown(label="Categoría", border_radius=12, options=[ft.dropdown.Option(cat) for cat in CATEGORIAS])
@@ -247,7 +263,6 @@ async def main(page: ft.Page):
 
     btn_guardar.on_click = enviar_gasto
 
-    # Accesos rápidos para transporte
     async def registrar_transporte_rapido(monto):
         payload = {
             "action": "agregar", "monto": float(monto), "categoria": "Transporte",
@@ -281,10 +296,10 @@ async def main(page: ft.Page):
     )
 
     # ==========================================
-    # 2. HISTORIAL / REPORTES
+    # 2. HISTORIAL
     # ==========================================
     lista_gastos = ft.Column(spacing=8)
-    
+
     def crear_control_gasto(item):
         cat = item.get("categoria", "Otros")
         monto = monto_seguro(item.get("monto"))
@@ -367,41 +382,80 @@ async def main(page: ft.Page):
     )
 
     # ==========================================
-    # 3. PRESUPUESTO MENSUAL
+    # 3. PRESUPUESTO MENSUAL Y GRÁFICAS
     # ==========================================
     presupuesto_input = ft.TextField(label="Monto base del mes ($)", keyboard_type="number", prefix=ft.Text("$ "), border_radius=12, expand=True)
     btn_presupuesto = ft.ElevatedButton("Guardar", icon="savings")
 
     presupuesto_text = ft.Text("$0", size=18, weight="bold")
     gastado_mes_text = ft.Text("$0", size=18, weight="bold", color="orange")
-    disponible_mes_text = ft.Text("$0", size=32, weight="bold", color="green")
+    disponible_mes_text = ft.Text("$0", size=28, weight="bold", color="green")
     
-    resumen_barras_mes = ft.Column(spacing=12)
+    # Contenedores para las gráficas
+    grafica_semana = ft.Row(alignment="spaceBetween", vertical_alignment="end")
+    resumen_barras_mes = ft.Column(spacing=10)
+
+    def construir_grafica_semanal(datos):
+        grafica_semana.controls.clear()
+        hoy = hoy_local()
+        inicio, fin = rango_semana(hoy)
+        
+        por_dia = {inicio + timedelta(days=i): 0.0 for i in range(7)}
+        for item in datos:
+            fecha_item = parsear_fecha(item.get("fecha"))
+            if fecha_item and inicio <= fecha_item <= fin:
+                por_dia[fecha_item] += monto_seguro(item.get("monto"))
+
+        valores = list(por_dia.values())
+        maximo = max(valores + [1.0])
+        alto_max = 90
+
+        for indice, (fecha_dia, monto) in enumerate(por_dia.items()):
+            alto = 4 if monto <= 0 else max(8, (monto / maximo) * alto_max)
+            es_hoy = fecha_dia == hoy
+
+            grafica_semana.controls.append(
+                ft.Column(
+                    controls=[
+                        ft.Text(formato_moneda_corto(monto), size=9, color="white" if es_hoy else "grey"),
+                        ft.Container(
+                            content=ft.Column(
+                                controls=[
+                                    ft.Container(expand=True),
+                                    ft.Container(
+                                        width=22, height=alto,
+                                        bgcolor="teal" if not es_hoy else "green",
+                                        border_radius=5
+                                    ),
+                                ],
+                                spacing=0,
+                            ),
+                            height=alto_max + 5,
+                        ),
+                        ft.Text(DIAS_CORTOS[indice], size=10, weight="bold" if es_hoy else None),
+                    ],
+                    spacing=3, horizontal_alignment="center",
+                )
+            )
 
     def calcular_gastos_mes(datos):
         hoy = hoy_local()
         mes_actual = hoy.month
         año_actual = hoy.year
 
-        gastos_mes = []
         totales_cat = {cat: 0.0 for cat in CATEGORIAS}
-
         if not datos:
-            return gastos_mes, totales_cat
+            return totales_cat
 
         for item in datos:
             fecha_item = parsear_fecha(item.get("fecha"))
-            if not fecha_item:
-                continue
-
-            if fecha_item.month == mes_actual and fecha_item.year == año_actual:
-                gastos_mes.append(item)
+            if fecha_item and fecha_item.month == mes_actual and fecha_item.year == año_actual:
                 cat = item.get("categoria", "Otros")
                 if cat not in CATEGORIAS:
                     cat = "Otros"
                 totales_cat[cat] += monto_seguro(item.get("monto"))
 
-        return gastos_mes, totales_cat
+        return totales_cat
 
     async def actualizar_panel_mensual(datos=None):
         if datos is None:
@@ -410,7 +464,7 @@ async def main(page: ft.Page):
         presupuesto_str = await page.client_storage.get_async("presupuesto_mensual")
         presupuesto = float(presupuesto_str) if presupuesto_str else 0.0
 
-        gastos_mes, totales_cat = calcular_gastos_mes(datos)
+        totales_cat = calcular_gastos_mes(datos)
         gastado_total = sum(totales_cat.values())
         restante = presupuesto - gastado_total
 
@@ -422,36 +476,42 @@ async def main(page: ft.Page):
         disponible_mes_text.value = formato_moneda(restante)
         disponible_mes_text.color = "red" if restante < 0 else "green"
 
-        # Dibujar barras del mes
-        resumen_barras_mes.controls.clear()
-        ancho_maximo = 300
-        if gastado_total > 0:
-            for cat, total in sorted(totales_cat.items(), key=lambda x: -x[1]):
-                if total == 0: continue
-                porcentaje = (total / gastado_total) * 100
-                ancho_relativo = max(2, (porcentaje / 100) * ancho_maximo)
-                color_cat = COLOR_MAP.get(cat, "grey")
+        # 1. Construir gráfica de la semana
+        construir_grafica_semanal(datos)
 
-                resumen_barras_mes.controls.append(
-                    ft.Column(
-                        controls=[
-                            ft.Row(
-                                controls=[ft.Text(cat, size=13, weight="bold", expand=True), ft.Text(f"{formato_moneda(total)} ({porcentaje:.1f}%)", size=12, color="grey")],
-                                alignment="spaceBetween",
+        # 2. Construir gráfica de barras por categoría
+        resumen_barras_mes.controls.clear()
+        ancho_maximo = 320
+
+        for cat in CATEGORIAS:
+            total = totales_cat.get(cat, 0.0)
+            porcentaje = (total / gastado_total * 100) if gastado_total > 0 else 0.0
+            ancho_relativo = max(2, (porcentaje / 100) * ancho_maximo) if gastado_total > 0 else 0
+            color_cat = COLOR_MAP.get(cat, "grey")
+
+            resumen_barras_mes.controls.append(
+                ft.Column(
+                    controls=[
+                        ft.Row(
+                            controls=[
+                                ft.Text(cat, size=12, weight="bold", expand=True),
+                                ft.Text(f"{formato_moneda(total)} ({porcentaje:.0f}%)", size=11, color="grey"),
+                            ],
+                            alignment="spaceBetween",
+                        ),
+                        ft.Container(
+                            content=ft.Stack(
+                                controls=[
+                                    ft.Container(width=ancho_maximo, height=8, bgcolor="#3a3a3a", border_radius=4),
+                                    ft.Container(width=ancho_relativo, height=8, bgcolor=color_cat, border_radius=4),
+                                ]
                             ),
-                            ft.Container(
-                                content=ft.Stack(
-                                    controls=[
-                                        ft.Container(width=ancho_maximo, height=8, bgcolor="#424242", border_radius=4),
-                                        ft.Container(width=ancho_relativo, height=8, bgcolor=color_cat, border_radius=4),
-                                    ]
-                                ),
-                                width=ancho_maximo, height=8,
-                            ),
-                        ],
-                        spacing=4,
-                    )
+                            width=ancho_maximo, height=8,
+                        ),
+                    ],
+                    spacing=3,
                 )
+            )
         page.update()
 
     async def guardar_presupuesto_mensual(e):
@@ -470,29 +530,32 @@ async def main(page: ft.Page):
     vista_mensual = ft.Container(
         content=ft.Column(
             controls=[
-                ft.Row(controls=[ft.Column(controls=[ft.Text("Mi Mes", size=22, weight="bold"), ft.Text(f"Estado del mes de {hoy_local().strftime('%B')}", size=12, color="grey")], spacing=2, expand=True), ft.IconButton("refresh", on_click=lambda e: cargar_mensual(force=True))], alignment="spaceBetween"),
+                ft.Row(controls=[ft.Column(controls=[ft.Text("Mi Presupuesto", size=22, weight="bold"), ft.Text(f"Resumen de {hoy_local().strftime('%B')}", size=12, color="grey")], spacing=2, expand=True), ft.IconButton("refresh", on_click=lambda e: cargar_mensual(force=True))], alignment="spaceBetween"),
                 ft.Card(
                     content=ft.Container(
                         content=ft.Column(
                             controls=[
                                 ft.Row(controls=[presupuesto_input, btn_presupuesto], vertical_alignment="center"),
                                 ft.Divider(height=10),
-                                ft.Row(controls=[ft.Column([ft.Text("Monto Base", size=11, color="grey"), presupuesto_text], expand=True), ft.Column([ft.Text("Gastado", size=11, color="grey"), gastado_mes_text], expand=True)]),
-                                ft.Container(height=10),
-                                ft.Container(content=ft.Column(controls=[ft.Text("Dinero disponible (Restante)", size=12, color="grey"), disponible_mes_text], spacing=2, horizontal_alignment="center"), padding=15, bgcolor="#252525", border_radius=12, width=400, alignment=ft.alignment.center),
-                                ft.Divider(height=20),
-                                ft.Text("Desglose del Mes", size=14, weight="bold"),
-                                resumen_barras_mes
+                                ft.Row(controls=[ft.Column([ft.Text("Monto Base", size=10, color="grey"), presupuesto_text], expand=True), ft.Column([ft.Text("Gastado Mes", size=10, color="grey"), gastado_mes_text], expand=True)]),
+                                ft.Container(height=5),
+                                ft.Container(content=ft.Column(controls=[ft.Text("Disponible al Mes", size=11, color="grey"), disponible_mes_text], spacing=2, horizontal_alignment="center"), padding=12, bgcolor="#252525", border_radius=12, width=380, alignment=ft.alignment.center),
                             ],
-                            spacing=12,
+                            spacing=10,
                         ),
-                        padding=18,
+                        padding=15,
                     )
                 ),
+                ft.Container(height=5),
+                ft.Text("Gasto esta Semana (Lun - Dom)", size=14, weight="bold"),
+                ft.Container(content=grafica_semana, padding=10, bgcolor="#1e1e1e", border_radius=12),
+                ft.Container(height=5),
+                ft.Text("Gastos por Categoría este Mes", size=14, weight="bold"),
+                ft.Container(content=resumen_barras_mes, padding=12, bgcolor="#1e1e1e", border_radius=12),
             ],
-            spacing=12,
+            spacing=10,
         ),
-        padding=20, visible=False,
+        padding=15, visible=False,
     )
 
     async def cargar_mensual(force=False):
@@ -503,7 +566,7 @@ async def main(page: ft.Page):
             show_snackbar(f"Error: {ex}", es_error=True)
 
     # ==========================================
-    # 4. NAVEGACIÓN INFERIOR
+    # 4. NAVEGACIÓN
     # ==========================================
     async def mostrar_vista(idx):
         vista_formulario.visible = idx == 0
@@ -528,7 +591,7 @@ async def main(page: ft.Page):
         destinations=[
             ft.NavigationBarDestination(icon="add_card", label="Registrar"),
             ft.NavigationBarDestination(icon="list_alt", label="Historial"),
-            ft.NavigationBarDestination(icon="account_balance_wallet", label="Mensual"),
+            ft.NavigationBarDestination(icon="bar_chart", label="Mensual"),
         ],
     )
 
