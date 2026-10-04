@@ -19,17 +19,15 @@ API_CONNECT_TIMEOUT = float(os.environ.get("API_CONNECT_TIMEOUT", "8"))
 API_READ_TIMEOUT = float(os.environ.get("API_READ_TIMEOUT", "35"))
 API_REINTENTOS = int(os.environ.get("API_REINTENTOS", "2"))
 
+# Solo las variables solicitadas
 COLOR_MAP = {
-    "Compras": "blue",
-    "Gastos Personales": "orange",
-    "Salidas": "pink",
+    "Comida": "orange",
     "Transporte": "teal",
     "Universidad": "green",
     "Otros": "grey",
 }
 
 CATEGORIAS = list(COLOR_MAP.keys())
-DIAS_CORTOS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
 
 
 def obtener_zona_horaria():
@@ -52,15 +50,6 @@ def formato_moneda(valor):
     except (TypeError, ValueError):
         numero = 0.0
     return f"${numero:,.0f}".replace(",", ".")
-
-
-def formato_moneda_corto(valor):
-    valor = float(valor or 0)
-    if abs(valor) >= 1_000_000:
-        return f"${valor / 1_000_000:.1f}M".replace(".0M", "M")
-    if abs(valor) >= 1_000:
-        return f"${valor / 1_000:.0f}k"
-    return formato_moneda(valor)
 
 
 def convertir_monto(texto):
@@ -103,11 +92,9 @@ def monto_seguro(valor):
 def parsear_fecha(valor):
     if valor in (None, ""):
         return None
-
     texto = str(valor).strip()
     if not texto:
         return None
-
     try:
         iso = texto.replace("Z", "+00:00")
         dt = datetime.fromisoformat(iso)
@@ -123,50 +110,11 @@ def parsear_fecha(valor):
             return datetime.strptime(parte_fecha, formato).date()
         except ValueError:
             continue
-
     return None
 
 
-def rango_semana(fecha=None):
-    fecha = fecha or hoy_local()
-    inicio = fecha - timedelta(days=fecha.weekday())
-    fin = inicio + timedelta(days=6)
-    return inicio, fin
-
-
-def calcular_gastos_transporte(datos):
-    """Calcula lo gastado en transporte hoy y en el mes actual."""
-    hoy = hoy_local()
-    mes_actual = hoy.month
-    año_actual = hoy.year
-
-    gastado_hoy = 0.0
-    gastado_mes = 0.0
-
-    if not datos:
-        return gastado_hoy, gastado_mes
-
-    for item in datos:
-        cat = item.get("categoria", "")
-        if cat != "Transporte":
-            continue
-
-        fecha_item = parsear_fecha(item.get("fecha"))
-        if not fecha_item:
-            continue
-
-        monto = monto_seguro(item.get("monto"))
-
-        if fecha_item.month == mes_actual and fecha_item.year == año_actual:
-            gastado_mes += monto
-            if fecha_item == hoy:
-                gastado_hoy += monto
-
-    return gastado_hoy, gastado_mes
-
-
 async def main(page: ft.Page):
-    page.title = "Mis Gastos"
+    page.title = "Mis Gastos Mensuales"
     page.theme_mode = "dark"
     page.padding = 10
     page.horizontal_alignment = "center"
@@ -174,7 +122,7 @@ async def main(page: ft.Page):
     http = requests.Session()
     http.headers.update({
         "Accept": "application/json",
-        "User-Agent": "MisGastosFlet/2.0",
+        "User-Agent": "MisGastosFlet/3.0",
     })
 
     cache = {"datos": None, "actualizado": 0.0}
@@ -195,25 +143,17 @@ async def main(page: ft.Page):
         for intento in range(API_REINTENTOS + 1):
             try:
                 respuesta = http.request(
-                    metodo,
-                    URL_API,
-                    params=params,
-                    json=payload,
-                    timeout=(API_CONNECT_TIMEOUT, API_READ_TIMEOUT),
-                    allow_redirects=True,
+                    metodo, URL_API, params=params, json=payload,
+                    timeout=(API_CONNECT_TIMEOUT, API_READ_TIMEOUT), allow_redirects=True,
                 )
-
                 if respuesta.status_code in (401, 403):
                     raise RuntimeError("El Web App de Google no permite acceso.")
-
                 if respuesta.status_code >= 400:
                     raise RuntimeError(f"HTTP {respuesta.status_code}")
-
                 try:
                     return respuesta.json()
                 except ValueError as ex:
                     raise RuntimeError("El servidor no devolvió JSON válido") from ex
-
             except (requests.Timeout, requests.ConnectionError) as ex:
                 ultimo_error = ex
                 if intento < API_REINTENTOS:
@@ -226,16 +166,10 @@ async def main(page: ft.Page):
                     time.sleep(0.8 * (intento + 1))
                     continue
                 raise RuntimeError(f"Error: {ex}") from ex
-
         raise RuntimeError(f"Fallo: {ultimo_error}")
 
     async def solicitar_json(metodo, *, params=None, payload=None):
-        return await asyncio.to_thread(
-            solicitar_json_sync,
-            metodo,
-            params=params,
-            payload=payload,
-        )
+        return await asyncio.to_thread(solicitar_json_sync, metodo, params=params, payload=payload)
 
     async def obtener_datos(force=False):
         ahora = time.monotonic()
@@ -254,12 +188,6 @@ async def main(page: ft.Page):
             cache["datos"] = datos
             cache["actualizado"] = time.monotonic()
             return datos
-
-    async def obtener_presupuesto_api():
-        resultado = await solicitar_json("GET", params={"action": "presupuesto_actual"})
-        if not isinstance(resultado, dict):
-            raise RuntimeError("Error al consultar el presupuesto.")
-        return resultado
 
     async def enviar_datos_api(payload, mensaje_exito):
         if api_write_lock.locked():
@@ -281,12 +209,11 @@ async def main(page: ft.Page):
                 return False
 
     # ==========================================
-    # 1. FORMULARIO REGISTRO
+    # 1. FORMULARIO REGISTRO Y ACCESO RÁPIDO
     # ==========================================
     monto_input = ft.TextField(label="Monto ($)", keyboard_type="number", prefix=ft.Text("$ "), border_radius=12)
     categoria_dropdown = ft.Dropdown(label="Categoría", border_radius=12, options=[ft.dropdown.Option(cat) for cat in CATEGORIAS])
     descripcion_input = ft.TextField(label="Descripción", border_radius=12)
-    chk_4x1000 = ft.Checkbox(label="Aplica impuesto 4x1000", value=False)
     btn_guardar = ft.ElevatedButton("Guardar Gasto", icon="save", style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), padding=18), width=350)
 
     async def enviar_gasto(e):
@@ -299,306 +226,65 @@ async def main(page: ft.Page):
             show_snackbar("Monto inválido", es_error=True)
             return
 
-        impuesto = round(monto * 4 / 1000, 2) if chk_4x1000.value else 0
         payload = {
             "action": "agregar",
             "monto": monto,
             "categoria": categoria_dropdown.value,
             "descripcion": descripcion_input.value or "",
-            "aplica4x1000": bool(chk_4x1000.value),
-            "valor4x1000": impuesto,
+            "aplica4x1000": False,
+            "valor4x1000": 0.0,
         }
 
         btn_guardar.disabled = True
         page.update()
-        guardado = await enviar_datos_api(payload, f"¡Gasto guardado! Impuesto: {formato_moneda(impuesto)}")
+        guardado = await enviar_datos_api(payload, f"¡Gasto guardado!")
         if guardado:
             monto_input.value = ""
             categoria_dropdown.value = None
             descripcion_input.value = ""
-            chk_4x1000.value = False
         btn_guardar.disabled = False
         page.update()
 
     btn_guardar.on_click = enviar_gasto
 
-    vista_formulario = ft.Container(
-        content=ft.Column(
-            controls=[
-                ft.Text("Nuevo Gasto", size=22, weight="bold"),
-                ft.Text("Registra tus consumos diarios", size=13, color="grey"),
-                ft.Divider(height=10, color="transparent"),
-                monto_input, categoria_dropdown, descripcion_input, chk_4x1000, ft.Container(height=5), btn_guardar,
-            ],
-            spacing=12,
-        ),
-        padding=20,
-        visible=True,
-    )
-
-    # ==========================================
-    # 2. VISTA TRANSPORTE (MEJORADA)
-    # ==========================================
-    presupuesto_transporte_input = ft.TextField(
-        label="Monto mensual ($)", keyboard_type="number", prefix=ft.Text("$ "), border_radius=12, expand=True
-    )
-    presupuesto_t_text = ft.Text("$0", size=16, weight="bold")
-    gastado_hoy_t_text = ft.Text("$0", size=16, weight="bold", color="orange")
-    gastado_mes_t_text = ft.Text("$0", size=16, weight="bold", color="red")
-    restante_mes_t_text = ft.Text("$0", size=24, weight="bold", color="green")
-    
-    monto_transporte_custom = ft.TextField(
-        label="Otro monto", keyboard_type="number", prefix=ft.Text("$ "), border_radius=12, expand=True
-    )
-
-    async def actualizar_panel_transporte(datos=None):
-        if datos is None:
-            datos = cache.get("datos") or []
-
-        presupuesto_str = await page.client_storage.get_async("presupuesto_transporte")
-        presupuesto = float(presupuesto_str) if presupuesto_str else 0.0
-
-        gastado_hoy, gastado_mes = calcular_gastos_transporte(datos)
-        restante = presupuesto - gastado_mes
-
-        presupuesto_transporte_input.value = str(int(presupuesto)) if presupuesto > 0 else ""
-        presupuesto_t_text.value = formato_moneda(presupuesto)
-        gastado_hoy_t_text.value = formato_moneda(gastado_hoy)
-        gastado_mes_t_text.value = formato_moneda(gastado_mes)
-        restante_mes_t_text.value = formato_moneda(restante)
-        restante_mes_t_text.color = "red" if restante < 0 else "green"
-        page.update()
-
-    async def guardar_presupuesto_transporte(e):
-        try:
-            valor = convertir_monto(presupuesto_transporte_input.value)
-        except ValueError:
-            show_snackbar("Monto inválido", es_error=True)
-            return
-
-        await page.client_storage.set_async("presupuesto_transporte", str(valor))
-        show_snackbar("Presupuesto mensual de transporte guardado")
-        await actualizar_panel_transporte(cache.get("datos") or [])
-
-    async def registrar_transporte(monto):
+    # Accesos rápidos para transporte
+    async def registrar_transporte_rapido(monto):
         payload = {
             "action": "agregar", "monto": float(monto), "categoria": "Transporte",
             "descripcion": "Transporte diario", "aplica4x1000": False, "valor4x1000": 0.0,
         }
-        guardado = await enviar_datos_api(payload, f"✓ Transporte de {formato_moneda(monto)} registrado")
-        if guardado:
-            try:
-                datos = await obtener_datos(force=True)
-                await actualizar_panel_transporte(datos)
-            except Exception:
-                pass
-
-    async def registrar_transporte_custom(e):
-        if not monto_transporte_custom.value:
-            show_snackbar("Ingresa un monto", es_error=True)
-            return
-        try:
-            monto = convertir_monto(monto_transporte_custom.value)
-        except ValueError:
-            show_snackbar("Monto inválido", es_error=True)
-            return
-        
-        await registrar_transporte(monto)
-        monto_transporte_custom.value = ""
-        page.update()
+        await enviar_datos_api(payload, f"✓ Transporte de {formato_moneda(monto)} registrado")
 
     def crear_tarjeta_transporte(monto):
         async def click_transporte(e):
-            await registrar_transporte(monto)
+            await registrar_transporte_rapido(monto)
         return ft.Container(
-            content=ft.Column(
-                controls=[ft.Icon("directions_bus", size=28, color="teal"), ft.Text(formato_moneda(monto), size=18, weight="bold")],
-                alignment="center", horizontal_alignment="center",
-            ),
-            bgcolor="#303030", border_radius=16, padding=15, ink=True, on_click=click_transporte, width=145, height=100,
+            content=ft.Column([ft.Icon("directions_bus", size=24, color="teal"), ft.Text(formato_moneda(monto), size=14, weight="bold")], alignment="center", horizontal_alignment="center"),
+            bgcolor="#303030", border_radius=12, padding=10, ink=True, on_click=click_transporte, width=110, height=75,
         )
 
-    vista_transporte = ft.Container(
+    vista_formulario = ft.Container(
         content=ft.Column(
             controls=[
-                ft.Text("Mi Transporte", size=22, weight="bold"),
-                ft.Card(
-                    content=ft.Container(
-                        content=ft.Column(
-                            controls=[
-                                ft.Row(
-                                    controls=[presupuesto_transporte_input, ft.ElevatedButton("Guardar", icon="save", on_click=guardar_presupuesto_transporte)],
-                                    vertical_alignment="center",
-                                ),
-                                ft.Divider(height=8),
-                                ft.Row(
-                                    controls=[
-                                        ft.Column([ft.Text("Mensual", size=10, color="grey"), presupuesto_t_text], expand=True),
-                                        ft.Column([ft.Text("Gastado Mes", size=10, color="grey"), gastado_mes_t_text], expand=True),
-                                        ft.Column([ft.Text("Gastado Hoy", size=10, color="grey"), gastado_hoy_t_text], expand=True),
-                                    ]
-                                ),
-                                ft.Container(height=4),
-                                ft.Container(
-                                    content=ft.Column(
-                                        controls=[ft.Text("Saldo Restante (Mes)", size=12, color="grey"), restante_mes_t_text]
-                                    ),
-                                    padding=10, bgcolor="#252525", border_radius=12,
-                                )
-                            ]
-                        ),
-                        padding=15
-                    )
-                ),
-                ft.Container(height=10),
-                ft.Text("Agregar Gasto Manual", size=16, weight="bold"),
+                ft.Text("Nuevo Gasto", size=22, weight="bold"),
+                monto_input, categoria_dropdown, descripcion_input, ft.Container(height=5), btn_guardar,
+                ft.Divider(height=20, color="transparent"),
+                ft.Text("Transporte Rápido", size=16, weight="bold"),
                 ft.Row(
-                    controls=[monto_transporte_custom, ft.ElevatedButton("Agregar", icon="add", on_click=registrar_transporte_custom)],
-                    vertical_alignment="center"
-                ),
-                ft.Container(height=10),
-                ft.Text("Acceso Rápido", size=16, weight="bold"),
-                ft.Row(
-                    controls=[
-                        crear_tarjeta_transporte(3000), crear_tarjeta_transporte(4000),
-                        crear_tarjeta_transporte(5000), crear_tarjeta_transporte(6000),
-                    ],
-                    alignment="center", wrap=True, spacing=12, run_spacing=12,
+                    controls=[crear_tarjeta_transporte(3000), crear_tarjeta_transporte(4000), crear_tarjeta_transporte(5000)],
+                    alignment="center", wrap=True, spacing=10
                 ),
             ],
-            horizontal_alignment="center",
+            spacing=12, horizontal_alignment="center"
         ),
-        padding=20,
-        visible=False,
+        padding=20, visible=True,
     )
 
     # ==========================================
-    # 3. REPORTES Y PRESUPUESTO SEMANAL
+    # 2. HISTORIAL / REPORTES
     # ==========================================
-    resumen_barras = ft.Column(spacing=12)
     lista_gastos = ft.Column(spacing=8)
-    total_text = ft.Text("$0", size=26, weight="bold", color="green")
-
-    presupuesto_input = ft.TextField(label="Presupuesto semanal ($)", keyboard_type="number", prefix=ft.Text("$ "), border_radius=12, expand=True)
-    btn_presupuesto = ft.ElevatedButton("Guardar", icon="savings")
-
-    presupuesto_text = ft.Text("$0", size=18, weight="bold")
-    gastado_semana_text = ft.Text("$0", size=18, weight="bold")
-    disponible_semana_text = ft.Text("$0", size=18, weight="bold")
-    disponible_dia_text = ft.Text("$0", size=28, weight="bold", color="green")
-    disponible_dia_subtext = ft.Text("Configura tu presupuesto semanal", size=11, color="grey")
-    progreso_semana = ft.ProgressBar(value=0, height=8)
-    grafica_semana = ft.Row(alignment="spaceBetween", vertical_alignment="end")
-    semana_rango_text = ft.Text("", size=11, color="grey")
-
-    estado_presupuesto = {"valor": 0.0}
-
-    def filtrar_semana(datos):
-        hoy = hoy_local()
-        inicio, fin = rango_semana(hoy)
-        gastos = []
-        por_dia = {inicio + timedelta(days=i): 0.0 for i in range(7)}
-
-        for item in datos:
-            fecha_item = parsear_fecha(item.get("fecha"))
-            if fecha_item is None or not (inicio <= fecha_item <= fin):
-                continue
-            monto = monto_seguro(item.get("monto"))
-            gastos.append(item)
-            por_dia[fecha_item] += monto
-        return inicio, fin, gastos, por_dia
-
-    def construir_grafica_semanal(por_dia, presupuesto):
-        grafica_semana.controls.clear()
-        valores = list(por_dia.values())
-        referencia_diaria = presupuesto / 7 if presupuesto > 0 else 0
-        maximo = max(valores + [referencia_diaria, 1])
-        alto_max = 105
-
-        for indice, (fecha_dia, monto) in enumerate(por_dia.items()):
-            alto = 3 if monto <= 0 else max(8, (monto / maximo) * alto_max)
-            es_hoy = fecha_dia == hoy_local()
-
-            grafica_semana.controls.append(
-                ft.Column(
-                    controls=[
-                        ft.Text(formato_moneda_corto(monto), size=9, color="white" if es_hoy else "grey"),
-                        ft.Container(
-                            content=ft.Column(
-                                controls=[
-                                    ft.Container(expand=True),
-                                    ft.Container(width=24, height=alto, bgcolor="blue" if not es_hoy else "green", border_radius=6),
-                                ],
-                                spacing=0,
-                            ),
-                            height=alto_max + 5,
-                        ),
-                        ft.Text(DIAS_CORTOS[indice], size=10, weight="bold" if es_hoy else None),
-                    ],
-                    spacing=3, horizontal_alignment="center",
-                )
-            )
-
-    def actualizar_panel_semana(datos):
-        presupuesto = estado_presupuesto["valor"]
-        inicio, fin, gastos_semana, por_dia = filtrar_semana(datos)
-        gastado = sum(monto_seguro(item.get("monto")) for item in gastos_semana)
-        restante = presupuesto - gastado
-        hoy = hoy_local()
-        dias_restantes = max(1, (fin - hoy).days + 1)
-        disponible_por_dia = max(restante, 0) / dias_restantes if presupuesto > 0 else 0
-
-        presupuesto_text.value = formato_moneda(presupuesto)
-        gastado_semana_text.value = formato_moneda(gastado)
-        disponible_semana_text.value = formato_moneda(restante)
-        disponible_semana_text.color = "red" if restante < 0 else "green"
-        disponible_dia_text.value = formato_moneda(disponible_por_dia)
-        disponible_dia_text.color = "red" if restante < 0 else "green"
-
-        if presupuesto <= 0:
-            disponible_dia_subtext.value = "Configura tu presupuesto semanal"
-            progreso_semana.value = 0
-        elif restante < 0:
-            disponible_dia_subtext.value = f"Te pasaste {formato_moneda(abs(restante))} del presupuesto"
-            progreso_semana.value = 1
-        else:
-            disponible_dia_subtext.value = (f"Promedio disponible para {dias_restantes} día" + ("" if dias_restantes == 1 else "s") + " (incluyendo hoy)")
-            progreso_semana.value = min(gastado / presupuesto, 1)
-
-        semana_rango_text.value = f"Semana: {inicio.strftime('%d/%m')} - {fin.strftime('%d/%m/%Y')}"
-        construir_grafica_semanal(por_dia, presupuesto)
-
-    async def guardar_presupuesto(e):
-        try:
-            valor = convertir_monto(presupuesto_input.value)
-        except ValueError:
-            show_snackbar("Presupuesto inválido", es_error=True)
-            return
-
-        if api_write_lock.locked():
-            show_snackbar("Procesando...", es_error=True)
-            return
-
-        async with api_write_lock:
-            btn_presupuesto.disabled = True
-            page.update()
-            try:
-                resultado = await solicitar_json("POST", payload={"action": "guardar_presupuesto", "presupuesto": valor})
-                if not isinstance(resultado, dict) or resultado.get("status") != "success":
-                    raise RuntimeError(resultado.get("message", "No se pudo guardar"))
-
-                estado_presupuesto["valor"] = valor
-                datos = cache["datos"] or await obtener_datos()
-                actualizar_panel_semana(datos)
-                show_snackbar(resultado.get("message", "Presupuesto semanal guardado"))
-            except Exception as ex:
-                show_snackbar(f"Error: {ex}", es_error=True)
-            finally:
-                btn_presupuesto.disabled = False
-                page.update()
-
-    btn_presupuesto.on_click = guardar_presupuesto
-
+    
     def crear_control_gasto(item):
         cat = item.get("categoria", "Otros")
         monto = monto_seguro(item.get("monto"))
@@ -627,7 +313,6 @@ async def main(page: ft.Page):
             if not estado["renderizado"]:
                 col_movimientos.controls.extend(crear_control_gasto(item) for item in items_dia)
                 estado["renderizado"] = True
-
             col_movimientos.visible = not col_movimientos.visible
             icono_toggle.name = "keyboard_arrow_up" if col_movimientos.visible else "keyboard_arrow_down"
             page.update()
@@ -642,40 +327,112 @@ async def main(page: ft.Page):
             ),
             ink=True, on_click=toggle_vis, padding=ft.padding.symmetric(horizontal=10, vertical=15), border_radius=8,
         )
-
         return ft.Container(content=ft.Column(controls=[header, col_movimientos], spacing=0), bgcolor="#1e1e1e", border_radius=10, margin=ft.margin.only(bottom=8))
 
     def renderizar_historial(datos):
         lista_gastos.controls.clear()
-        resumen_barras.controls.clear()
-
         if not datos:
-            total_text.value = "$0"
-            actualizar_panel_semana([])
             return
 
-        totales = defaultdict(float)
-        gran_total = 0.0
         gastos_por_fecha = defaultdict(list)
-
         for item in datos:
-            cat = item.get("categoria", "Otros") or "Otros"
-            monto = monto_seguro(item.get("monto"))
             fecha = parsear_fecha(item.get("fecha"))
             fecha_key = fecha.isoformat() if fecha else str(item.get("fecha", "Sin fecha")).split("T")[0]
-
-            totales[cat] += monto
-            gran_total += monto
             gastos_por_fecha[fecha_key].append(item)
 
+        def clave_orden(fecha_texto):
+            try: return (1, date.fromisoformat(fecha_texto))
+            except ValueError: return (0, date.min)
+
+        for fecha_key in sorted(gastos_por_fecha.keys(), key=clave_orden, reverse=True):
+            lista_gastos.controls.append(crear_grupo_fecha(fecha_key, gastos_por_fecha[fecha_key]))
+
+    async def cargar_historial(e=None, force=False):
+        try:
+            datos = await obtener_datos(force=force)
+            renderizar_historial(datos)
+        except Exception as ex:
+            show_snackbar(f"Error: {ex}", es_error=True)
+        page.update()
+
+    vista_historial = ft.Container(
+        content=ft.Column(
+            controls=[
+                ft.Row(controls=[ft.Text("Historial General", size=22, weight="bold"), ft.IconButton("refresh", on_click=lambda e: cargar_historial(force=True))], alignment="spaceBetween"),
+                ft.Container(height=10),
+                lista_gastos,
+            ]
+        ),
+        padding=20, visible=False,
+    )
+
+    # ==========================================
+    # 3. PRESUPUESTO MENSUAL
+    # ==========================================
+    presupuesto_input = ft.TextField(label="Monto base del mes ($)", keyboard_type="number", prefix=ft.Text("$ "), border_radius=12, expand=True)
+    btn_presupuesto = ft.ElevatedButton("Guardar", icon="savings")
+
+    presupuesto_text = ft.Text("$0", size=18, weight="bold")
+    gastado_mes_text = ft.Text("$0", size=18, weight="bold", color="orange")
+    disponible_mes_text = ft.Text("$0", size=32, weight="bold", color="green")
+    
+    resumen_barras_mes = ft.Column(spacing=12)
+
+    def calcular_gastos_mes(datos):
+        hoy = hoy_local()
+        mes_actual = hoy.month
+        año_actual = hoy.year
+
+        gastos_mes = []
+        totales_cat = {cat: 0.0 for cat in CATEGORIAS}
+
+        if not datos:
+            return gastos_mes, totales_cat
+
+        for item in datos:
+            fecha_item = parsear_fecha(item.get("fecha"))
+            if not fecha_item:
+                continue
+
+            if fecha_item.month == mes_actual and fecha_item.year == año_actual:
+                gastos_mes.append(item)
+                cat = item.get("categoria", "Otros")
+                if cat not in CATEGORIAS:
+                    cat = "Otros"
+                totales_cat[cat] += monto_seguro(item.get("monto"))
+
+        return gastos_mes, totales_cat
+
+    async def actualizar_panel_mensual(datos=None):
+        if datos is None:
+            datos = cache.get("datos") or []
+
+        presupuesto_str = await page.client_storage.get_async("presupuesto_mensual")
+        presupuesto = float(presupuesto_str) if presupuesto_str else 0.0
+
+        gastos_mes, totales_cat = calcular_gastos_mes(datos)
+        gastado_total = sum(totales_cat.values())
+        restante = presupuesto - gastado_total
+
+        if presupuesto > 0:
+            presupuesto_input.value = str(int(presupuesto))
+        
+        presupuesto_text.value = formato_moneda(presupuesto)
+        gastado_mes_text.value = formato_moneda(gastado_total)
+        disponible_mes_text.value = formato_moneda(restante)
+        disponible_mes_text.color = "red" if restante < 0 else "green"
+
+        # Dibujar barras del mes
+        resumen_barras_mes.controls.clear()
         ancho_maximo = 300
-        if gran_total > 0:
-            for cat, total in sorted(totales.items(), key=lambda x: -x[1]):
-                porcentaje = (total / gran_total) * 100
+        if gastado_total > 0:
+            for cat, total in sorted(totales_cat.items(), key=lambda x: -x[1]):
+                if total == 0: continue
+                porcentaje = (total / gastado_total) * 100
                 ancho_relativo = max(2, (porcentaje / 100) * ancho_maximo)
                 color_cat = COLOR_MAP.get(cat, "grey")
 
-                resumen_barras.controls.append(
+                resumen_barras_mes.controls.append(
                     ft.Column(
                         controls=[
                             ft.Row(
@@ -695,122 +452,69 @@ async def main(page: ft.Page):
                         spacing=4,
                     )
                 )
-
-        def clave_orden(fecha_texto):
-            try:
-                return (1, date.fromisoformat(fecha_texto))
-            except ValueError:
-                return (0, date.min)
-
-        for fecha_key in sorted(gastos_por_fecha.keys(), key=clave_orden, reverse=True):
-            lista_gastos.controls.append(crear_grupo_fecha(fecha_key, gastos_por_fecha[fecha_key]))
-
-        total_text.value = formato_moneda(gran_total)
-        actualizar_panel_semana(datos)
-
-    async def cargar_historial(e=None, force=False):
-        total_text.value = "Cargando..."
         page.update()
+
+    async def guardar_presupuesto_mensual(e):
         try:
-            datos = await obtener_datos(force=force)
-            renderizar_historial(datos)
-        except Exception as ex:
-            total_text.value = "Error"
-            show_snackbar(f"Error: {ex}", es_error=True)
-        page.update()
-
-    async def refrescar_historial(e):
-        await cargar_historial(force=True)
-
-    tarjeta_presupuesto = ft.Card(
-        content=ft.Container(
-            content=ft.Column(
-                controls=[
-                    ft.Row(controls=[ft.Column(controls=[ft.Text("Presupuesto semanal", size=17, weight="bold"), semana_rango_text], spacing=2, expand=True), ft.Icon("account_balance_wallet", color="green")]),
-                    ft.Row(controls=[presupuesto_input, btn_presupuesto], vertical_alignment="center"),
-                    ft.Divider(height=8),
-                    ft.Row(controls=[ft.Column([ft.Text("Presupuesto", size=10, color="grey"), presupuesto_text], expand=True), ft.Column([ft.Text("Gastado", size=10, color="grey"), gastado_semana_text], expand=True), ft.Column([ft.Text("Disponible", size=10, color="grey"), disponible_semana_text], expand=True)], spacing=8),
-                    progreso_semana, ft.Container(height=4),
-                    ft.Container(content=ft.Column(controls=[ft.Text("Puedes gastar por día", size=11, color="grey"), disponible_dia_text, disponible_dia_subtext], spacing=2), padding=14, bgcolor="#252525", border_radius=12),
-                    ft.Text("Gasto de esta semana", size=13, weight="bold"), grafica_semana,
-                ],
-                spacing=12,
-            ),
-            padding=18,
-        )
-    )
-
-    vista_historial = ft.Container(
-        content=ft.Column(
-            controls=[
-                ft.Row(controls=[ft.Text("Reportes", size=22, weight="bold"), ft.IconButton("refresh", on_click=refrescar_historial)], alignment="spaceBetween"),
-                ft.Card(content=ft.Container(content=ft.Column(controls=[ft.Text("Gasto Total", size=12, color="grey"), total_text, ft.Divider(height=10), resumen_barras]), padding=20)),
-                ft.Container(height=10), ft.Text("Historial por Día", size=16, weight="bold", color="white"), lista_gastos,
-            ]
-        ),
-        padding=20, visible=False,
-    )
-
-    async def cargar_presupuesto(e=None, force=False):
-        disponible_dia_subtext.value = "Cargando presupuesto..."
-        page.update()
-        try:
-            datos = await obtener_datos(force=force)
-        except Exception as ex:
-            disponible_dia_subtext.value = "No se pudieron cargar los gastos"
-            show_snackbar(f"Error: {ex}", es_error=True)
-            page.update()
+            valor = convertir_monto(presupuesto_input.value)
+        except ValueError:
+            show_snackbar("Presupuesto inválido", es_error=True)
             return
 
-        try:
-            info_presupuesto = await obtener_presupuesto_api()
-            presupuesto = monto_seguro(info_presupuesto.get("presupuesto", 0))
-            estado_presupuesto["valor"] = presupuesto
+        await page.client_storage.set_async("presupuesto_mensual", str(valor))
+        show_snackbar("Monto mensual guardado correctamente")
+        await actualizar_panel_mensual(cache.get("datos") or [])
 
-            if presupuesto > 0:
-                presupuesto_input.value = str(int(presupuesto))
-            else:
-                presupuesto_input.value = ""
-            actualizar_panel_semana(datos)
-        except Exception as ex:
-            actualizar_panel_semana(datos)
-            disponible_dia_subtext.value = "No se pudo leer el presupuesto"
-        page.update()
+    btn_presupuesto.on_click = guardar_presupuesto_mensual
 
-    async def refrescar_presupuesto(e):
-        await cargar_presupuesto(force=True)
-
-    vista_presupuesto = ft.Container(
+    vista_mensual = ft.Container(
         content=ft.Column(
             controls=[
-                ft.Row(controls=[ft.Column(controls=[ft.Text("Presupuesto", size=22, weight="bold"), ft.Text("Controla cuánto puedes gastar esta semana", size=12, color="grey")], spacing=2, expand=True), ft.IconButton("refresh", on_click=refrescar_presupuesto)], alignment="spaceBetween"),
-                tarjeta_presupuesto,
+                ft.Row(controls=[ft.Column(controls=[ft.Text("Mi Mes", size=22, weight="bold"), ft.Text(f"Estado del mes de {hoy_local().strftime('%B')}", size=12, color="grey")], spacing=2, expand=True), ft.IconButton("refresh", on_click=lambda e: cargar_mensual(force=True))], alignment="spaceBetween"),
+                ft.Card(
+                    content=ft.Container(
+                        content=ft.Column(
+                            controls=[
+                                ft.Row(controls=[presupuesto_input, btn_presupuesto], vertical_alignment="center"),
+                                ft.Divider(height=10),
+                                ft.Row(controls=[ft.Column([ft.Text("Monto Base", size=11, color="grey"), presupuesto_text], expand=True), ft.Column([ft.Text("Gastado", size=11, color="grey"), gastado_mes_text], expand=True)]),
+                                ft.Container(height=10),
+                                ft.Container(content=ft.Column(controls=[ft.Text("Dinero disponible (Restante)", size=12, color="grey"), disponible_mes_text], spacing=2, horizontal_alignment="center"), padding=15, bgcolor="#252525", border_radius=12, width=400, alignment=ft.alignment.center),
+                                ft.Divider(height=20),
+                                ft.Text("Desglose del Mes", size=14, weight="bold"),
+                                resumen_barras_mes
+                            ],
+                            spacing=12,
+                        ),
+                        padding=18,
+                    )
+                ),
             ],
             spacing=12,
         ),
         padding=20, visible=False,
     )
 
+    async def cargar_mensual(force=False):
+        try:
+            datos = await obtener_datos(force=force)
+            await actualizar_panel_mensual(datos)
+        except Exception as ex:
+            show_snackbar(f"Error: {ex}", es_error=True)
+
     # ==========================================
     # 4. NAVEGACIÓN INFERIOR
     # ==========================================
     async def mostrar_vista(idx):
         vista_formulario.visible = idx == 0
-        vista_transporte.visible = idx == 1
-        vista_historial.visible = idx == 2
-        vista_presupuesto.visible = idx == 3
+        vista_historial.visible = idx == 1
+        vista_mensual.visible = idx == 2
         page.update()
 
         if idx == 1:
-            try:
-                datos = await obtener_datos()
-                await actualizar_panel_transporte(datos)
-            except Exception:
-                pass
-        elif idx == 2:
             await cargar_historial()
-        elif idx == 3:
-            await cargar_presupuesto()
+        elif idx == 2:
+            await cargar_mensual()
 
     async def cambiar_pestana(e):
         indice = e.control.selected_index
@@ -823,23 +527,18 @@ async def main(page: ft.Page):
         bgcolor="#1e1e1e",
         destinations=[
             ft.NavigationBarDestination(icon="add_card", label="Registrar"),
-            ft.NavigationBarDestination(icon="directions_bus", label="Transporte"),
-            ft.NavigationBarDestination(icon="bar_chart", label="Reportes"),
-            ft.NavigationBarDestination(icon="account_balance_wallet", label="Presupuesto"),
+            ft.NavigationBarDestination(icon="list_alt", label="Historial"),
+            ft.NavigationBarDestination(icon="account_balance_wallet", label="Mensual"),
         ],
     )
 
     body = ft.Container(
-        content=ft.Column(
-            controls=[vista_formulario, vista_transporte, vista_historial, vista_presupuesto],
-            scroll="auto", horizontal_alignment="center",
-        ),
+        content=ft.Column(controls=[vista_formulario, vista_historial, vista_mensual], scroll="auto", horizontal_alignment="center"),
         expand=True, width=480,
     )
 
     page.add(body)
-    actualizar_panel_semana([])
-    page.update()
+    await actualizar_panel_mensual([])
 
 if __name__ == "__main__":
     puerto = int(os.environ.get("PORT", 7860))
