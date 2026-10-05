@@ -221,11 +221,11 @@ async def main(page: ft.Page):
                 show_snackbar(resultado.get("message", mensaje_exito))
                 return True
             except Exception as ex:
-                show_snackbar(f"Error al guardar: {ex}", es_error=True)
+                show_snackbar(f"Error en la operación: {ex}", es_error=True)
                 return False
 
     # ==========================================
-    # 1. FORMULARIO REGISTRO
+    # 1. FORMULARIO REGISTRO Y ACCESOS RÁPIDOS
     # ==========================================
     monto_input = ft.TextField(label="Monto ($)", keyboard_type="number", prefix=ft.Text("$ "), border_radius=12)
     categoria_dropdown = ft.Dropdown(label="Categoría", border_radius=12, options=[ft.dropdown.Option(cat) for cat in CATEGORIAS])
@@ -253,7 +253,7 @@ async def main(page: ft.Page):
 
         btn_guardar.disabled = True
         page.update()
-        guardado = await enviar_datos_api(payload, f"¡Gasto guardado!")
+        guardado = await enviar_datos_api(payload, "¡Gasto guardado!")
         if guardado:
             monto_input.value = ""
             categoria_dropdown.value = None
@@ -296,9 +296,45 @@ async def main(page: ft.Page):
     )
 
     # ==========================================
-    # 2. HISTORIAL
+    # 2. HISTORIAL CON OPCIÓN DE ELIMINAR
     # ==========================================
     lista_gastos = ft.Column(spacing=8)
+
+    async def confirmar_eliminar_gasto(item):
+        monto = monto_seguro(item.get("monto"))
+        cat = item.get("categoria", "Otros")
+
+        async def borrar_confirmado(e):
+            page.dialog.open = False
+            page.update()
+
+            payload = {
+                "action": "eliminar",
+                "id": item.get("id") or item.get("fila") or item.get("timestamp"),
+                "fecha": item.get("fecha"),
+                "monto": monto,
+                "categoria": cat,
+            }
+            exito = await enviar_datos_api(payload, f"Gasto de {formato_moneda(monto)} eliminado")
+            if exito:
+                await cargar_historial(force=True)
+
+        def cancelar_borrado(e):
+            page.dialog.open = False
+            page.update()
+
+        dialogo = ft.AlertDialog(
+            title=ft.Text("¿Eliminar este gasto?"),
+            content=ft.Text(f"Se borrará el gasto de {formato_moneda(monto)} en '{cat}'."),
+            actions=[
+                ft.TextButton("Cancelar", on_click=cancelar_borrado),
+                ft.ElevatedButton("Eliminar", bgcolor="red", color="white", on_click=borrar_confirmado),
+            ],
+            actions_alignment="end",
+        )
+        page.dialog = dialogo
+        dialogo.open = True
+        page.update()
 
     def crear_control_gasto(item):
         cat = item.get("categoria", "Otros")
@@ -306,16 +342,29 @@ async def main(page: ft.Page):
         desc = item.get("descripcion", "")
         color_cat = COLOR_MAP.get(cat, "grey")
 
+        async def click_borrar(e):
+            await confirmar_eliminar_gasto(item)
+
+        btn_borrar = ft.IconButton(
+            icon="delete_outline",
+            icon_color="red_400",
+            icon_size=20,
+            tooltip="Eliminar gasto",
+            on_click=click_borrar,
+        )
+
         return ft.Container(
             content=ft.Row(
                 controls=[
                     ft.Container(width=4, height=35, bgcolor=color_cat, border_radius=2),
                     ft.Column(controls=[ft.Text(cat, weight="bold", size=14), ft.Text(desc if desc else "Sin descripción", size=11, color="grey")], spacing=2, expand=True),
                     ft.Text(formato_moneda(monto), weight="bold", size=14),
+                    btn_borrar,
                 ],
                 alignment="spaceBetween",
             ),
-            padding=12, bgcolor="#303030", border_radius=12,
+            padding=ft.padding.only(left=12, top=6, right=6, bottom=6),
+            bgcolor="#303030", border_radius=12,
         )
 
     def crear_grupo_fecha(fecha, items_dia):
@@ -391,7 +440,6 @@ async def main(page: ft.Page):
     gastado_mes_text = ft.Text("$0", size=18, weight="bold", color="orange")
     disponible_mes_text = ft.Text("$0", size=28, weight="bold", color="green")
     
-    # Contenedores para las gráficas
     grafica_semana = ft.Row(alignment="spaceBetween", vertical_alignment="end")
     resumen_barras_mes = ft.Column(spacing=10)
 
@@ -476,10 +524,10 @@ async def main(page: ft.Page):
         disponible_mes_text.value = formato_moneda(restante)
         disponible_mes_text.color = "red" if restante < 0 else "green"
 
-        # 1. Construir gráfica de la semana
+        # 1. Gráfica semanal
         construir_grafica_semanal(datos)
 
-        # 2. Construir gráfica de barras por categoría
+        # 2. Gráfica por categoría
         resumen_barras_mes.controls.clear()
         ancho_maximo = 320
 
